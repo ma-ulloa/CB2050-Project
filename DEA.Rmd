@@ -1,0 +1,1933 @@
+---
+title: "EDA"
+author: "Maria Ulloa"
+date: "2024-11-01"
+output: html_document
+---
+
+```{r}
+# Load the tidyverse package
+suppressMessages(library(tidyverse))
+suppressMessages(library(readr))
+suppressMessages(library(tidymodels))
+suppressMessages(library(themis)) # Class imbalances
+suppressMessages(library(vip)) # Check importance of features in the model
+suppressMessages(library(DALEXtra))
+suppressMessages(library(tune))
+suppressMessages(library(doParallel))
+suppressMessages(library(patchwork))
+suppressMessages(library(scales))
+suppressMessages(library(paletteer))
+suppressMessages(library(pROC))
+suppressMessages(library(cluster))
+supressMessages(library(uwot))
+
+source("Utils.R")
+#load("vip_glm_rf.RData")
+
+```
+
+
+```{r}
+# Load the data
+data <- read_csv("./../data/0811_long_auto_healthy.csv")
+
+# subset dataframe to just Sample and Disease columns
+sample_info <- data %>% dplyr::select(DAid, Disease)
+
+# make data wide format
+wide_data <- data %>% dplyr::select(DAid,Disease, Age, Sex, Assay, NPX) %>% spread(Assay,NPX,-1)
+
+# Need to make Cancer column a factor for the machine learning downstream
+wide_data <- wide_data %>% mutate(Disease = as.factor(Disease))
+wide_data <- wide_data %>% mutate(Sex = as.factor(Sex))
+
+
+```
+
+# Data Exploration
+
+```{r}
+
+# Number of patients per Disease
+
+wide_data |>
+  group_by(Disease) |>
+  summarise(n = n())
+
+wide_data |>
+  group_by(Disease, Sex) |>
+  summarise(n = n())
+
+```
+
+
+```{r}
+
+# Use in a ggplot2 chart:
+scale_colour_paletteer_d("tvthemes::Opal")
+scale_fill_paletteer_d("tvthemes::Opal")
+
+# Plot
+palete <- paletteer_d("tvthemes::Opal")
+#palete <- palete[palete != "#ECF1F4FF"]
+names(palete) <- levels(wide_data$Disease)  
+palete <- palete[1:length(unique(wide_data$Disease))]  
+
+ggplot(wide_data_auto) +
+  geom_bar(aes(x = Disease, fill = Disease)) +  # Map fill aesthetic inside geom_bar
+  scale_fill_manual(values = palete) +  # Apply the palette
+  ylab("Number of Samples") +
+  theme_classic() + theme(axis.text.x = element_blank())
+
+ggsave("Disease_barplot.pdf", width = 12, height = 6, units = "cm")
+
+```
+
+```{r}
+# Exlude healthy samples
+
+data_autoimmune <- data |> filter(!Disease == "Healthy")
+wide_data_auto <- data_autoimmune %>% dplyr::select(DAid,Age,Sex,Disease, Assay,NPX) %>% spread(Assay,NPX,-1)
+wide_data_auto <- wide_data_auto %>% mutate(Disease = as.factor(Disease))
+
+```
+
+```{r}
+
+wide_data_auto |> 
+  group_by(Disease) |> 
+  summarise(
+    females = sum(Sex == "F", na.rm = TRUE), # Count of females
+    males = sum(Sex == "M", na.rm = TRUE)     # Count of males
+  )
+
+
+```
+
+```{r}
+sex_cols <- c("#dbbadd", "#b5d6b2")
+
+ggplot(wide_data_auto) +
+  geom_bar(aes(x = Sex, fill = Sex), position = position_stack(reverse = TRUE)) +  # Map fill aesthetic inside geom_bar
+  scale_fill_manual(values = sex_cols) +  # Apply the palette
+  facet_wrap(vars(Disease), ncol = 1) +
+  ylab("") +
+  theme_ema()
+
+ggsave("Sex_by_disease.pdf", width =8 , height = 15, units = "cm")
+
+```
+
+
+```{r}
+
+# Age range by disease
+
+ggplot(data=wide_data, aes(x=Age, group=Disease, fill=Disease)) +
+    geom_density(adjust=1.5, alpha=.4) +
+    scale_fill_manual(values = palete) +
+    theme_minimal()
+
+ggplot(data=wide_data_auto, aes(x=Age, group=Disease, fill=Disease)) +
+    geom_density(adjust=1.5, alpha=.8) +
+    facet_wrap(vars(Disease), ncol = 1) +
+    scale_fill_manual(values = palete) +
+    ylab("") +
+    theme_ema()
+
+
+ggsave("Age_by_disease.pdf", width = 10, height = 15, units = "cm")
+
+```
+
+
+# PCA visualization
+
+
+```{r}
+
+## Run PCA using tidymodels
+# create PCA 'recipe'
+pca_rec <-
+    recipe( ~ ., data = wide_data) %>%
+    # make sample and cancer columns ID columns so the PCA runs only on numeric values
+    update_role(DAid,Disease,Age,Sex, new_role = "id")  %>%
+    # normalize all values
+    step_normalize(all_predictors()) %>%
+    # run PCA
+    step_pca(all_predictors())
+
+pca_prep <- prep(pca_rec)
+
+tidied_pca <- tidy(pca_prep, 2)
+pca_res <-  juice(pca_prep)
+
+
+```
+
+```{r}
+
+# Plot
+
+pca_res %>%
+  ggplot(aes(PC1, PC2, color = wide_data$Disease)) +
+  geom_point() +
+  labs(title = "PCA of Autoimmune_Healthy_olink_3110",
+       x = "PC1",
+       y = "PC2") +
+  theme_classic() +
+  scale_color_manual(values = palete) 
+```
+
+# Without the healthy cohort
+
+```{r}
+
+## Run PCA using tidymodels
+# create PCA 'recipe'
+pca_rec <-
+    recipe( ~ ., data = wide_data_auto) %>%
+    # make sample and cancer columns ID columns so the PCA runs only on numeric values
+    update_role(DAid,Disease,Age,Sex, new_role = "id")  %>%
+    # normalize all values
+    step_normalize(all_predictors()) %>%
+    # run PCA
+    step_pca(all_predictors())
+
+pca_prep <- prep(pca_rec)
+
+tidied_pca <- tidy(pca_prep, 2)
+pca_res <-  juice(pca_prep)
+
+
+pca_res %>%
+  ggplot(aes(PC1, PC2, color = wide_data_auto$Disease)) +
+  geom_point(size = 3, alpha = 0.8) +
+  labs(title = "PCA of Autoimmune_Healthy_olink_3110",
+       x = "PC1",
+       y = "PC2") +
+  theme_classic() +
+  scale_color_manual(values = palete) 
+
+```
+
+```{r}
+
+library(Rtsne)
+
+set.seed(502)
+# Perform t-SNE (same as before)
+tsne_result <- Rtsne(wide_data_auto, dims = 2, perplexity = 30, check_duplicates = FALSE)
+
+# Prepare t-SNE data frame (same as before)
+tsne_data <- as.data.frame(tsne_result$Y)
+colnames(tsne_data) <- c("Dim1", "Dim2")
+tsne_data$Class <- as.factor(wide_data_auto$Disease)  # Add disease classes
+
+
+tsne_auto_raw <- ggplot(tsne_data, aes(x = Dim1, y = Dim2, color = Class)) +
+                geom_point(size = 3, alpha = 0.8) +
+                theme_minimal() +
+                labs(
+                  title = "t-SNE of Autoimmune",
+                  x = "Dimension 1",
+                  y = "Dimension 2",
+                  color = "Disease Class",
+                ) +
+                scale_color_manual(values = palete) +
+                theme(legend.position = "right")
+
+tsne_auto_raw
+ggsave("t-sne_autoimmune.pdf", width = 15, height = 10, units = "cm")
+
+```
+
+```{r}
+
+set.seed(502)  # Ensure reproducibility
+
+numeric_data <- wide_data_auto[, -c(1:4)]  
+disease_labels <- wide_data_auto$Disease  
+
+umap_result <- umap(
+  numeric_data,
+  n_neighbors = 15,
+  min_dist = 0.1,
+  metric = "euclidean",
+  init = "random",
+  ret_model = FALSE  
+)
+
+umap_data <- as.data.frame(umap_result)
+colnames(umap_data) <- c("Dim1", "Dim2")  
+umap_data$Disease <- factor(disease_labels)  # Add disease labels
+
+umap_plot <- ggplot(umap_data, aes(x = Dim1, y = Dim2, color = Disease)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "UMAP of Autoimmune Data",
+    x = "Dim 1",
+    y = "Dim 2",
+    color = "Disease"
+  ) +
+  scale_color_manual(values = palete) +  
+  theme(legend.position = "right")
+
+# Save the plot
+ggsave("umap_autoimmune.pdf", plot = umap_plot, width = 15, height = 10, units = "cm")
+
+# Display the plot
+print(umap_plot)
+
+
+
+
+
+
+```
+
+
+
+```{r}
+
+ggplot(wide_data_auto) +
+  geom_bar(aes(x = Disease, fill = Disease)) +  # Map fill aesthetic inside geom_bar
+  scale_fill_manual(values = palete) +  # Apply the palette
+  theme_classic() +
+  theme(axis.text.x = element_blank())
+
+ggsave("Disease.png", width = 15, height = 10, units = "cm")
+
+```
+
+
+# Split data
+
+```{r}
+
+set.seed(502)
+auto_split <- initial_split(wide_data_auto, prop = 0.70, strata = Disease)
+auto_train <- training(auto_split)
+auto_test  <- testing(auto_split)
+
+
+```
+
+```{r}
+
+# Check how balance classes are
+
+auto_train |> count(Disease)
+auto_test |> count(Disease)
+
+
+ggplot(auto_train) +
+  geom_bar(aes(x = Disease, fill = Disease)) +  # Map fill aesthetic inside geom_bar
+  scale_fill_manual(values = palete) +  # Apply the palette
+  theme_classic() +
+  ggtitle("Training set")
+
+ggplot(auto_test) +
+  geom_bar(aes(x = Disease, fill = Disease)) +  # Map fill aesthetic inside geom_bar
+  scale_fill_manual(values = palete) +  # Apply the palette
+  theme_classic() +
+  ggtitle("Testing set")
+
+```
+
+# Deal with class imbalances and preprocessing of data 
+
+```{r}
+set.seed(502)
+
+# Define cross-validation folds on the original training data
+k_folds_data <- vfold_cv(auto_train, v = 5, strata = Disease)
+
+# Define the control and metrics
+model_control <- control_grid(save_pred = TRUE, parallel_over = "everything")
+model_metrics <- metric_set(accuracy, sens, spec, mn_log_loss, roc_auc)
+
+```
+
+
+# Set models
+
+```{r}
+
+# Define multi-class model with logistic regression -----------------------------
+logistic_model <- multinom_reg(penalty = tune(), mixture = 1) |>
+  set_engine("glmnet") |>
+  set_mode("classification")
+
+# Define Random Forest model ---------------------------------------------------
+rf_model <- rand_forest(trees = tune(), mtry = tune()) |>
+            set_mode("classification") |>
+            set_engine("ranger", importance = "impurity") 
+            
+# Define KNN model ------------------------------------------------------------
+knn_model <- nearest_neighbor(neighbors = tune()) |>
+            set_mode("classification") |>
+            set_engine("kknn")
+
+# Define 
+xboost_model <- boost_tree(mtry = tune(), trees = tune(), min_n = tune(), 
+               tree_depth = tune(),learn_rate = tune(), 
+               loss_reduction = tune(), sample_size = tune(),
+               stop_iter = tune()) |>
+               set_engine("xgboost") |>
+               set_mode("classification") |>
+               translate()
+
+```
+
+# Set workflows
+
+```{r}
+
+# Logistic regression workflow
+multilog_wf <- workflow() |>
+  add_model(logistic_model) |>
+  add_recipe(multi_rec)
+
+# Ramdom forest 
+
+rf_workflow <- workflow() |>
+  add_model(rf_model) |>
+  add_recipe(multi_rec) 
+
+# Knn model
+
+knn_workflow <- workflow() |>
+  add_model(knn_model) |>
+  add_recipe(multi_rec)
+
+# Xboost workflow
+
+xboost_workflow <- workflow() |>
+  add_model(xboost_model) |>
+  add_recipe(multi_rec)
+
+
+```
+
+
+# Tuning grids
+
+```{r}
+
+# Logistic tuning grid
+logistic_grid <- grid_regular(parameters(logistic_model), levels = 30)
+
+# Finalize mtry based on the training data
+rf_params <- parameters(rf_model) |> 
+  update(mtry = finalize(mtry(), auto_train))  
+
+# Random Forest grid
+rf_grid <- grid_regular(rf_params, levels = 6, filter = c(trees > 1))
+
+#Knn grid
+knn_grid <- grid_regular(dials::neighbors(range(2,15)))
+
+#xboost grid
+xgb_grid <- grid_latin_hypercube(
+  trees(),             
+  stop_iter(),         
+  tree_depth(),        
+  min_n(),             
+  loss_reduction(),    
+  sample_size = sample_prop(),
+  finalize(mtry(), auto_train),
+  learn_rate(), size = 10 
+)
+
+
+```
+
+### Train & Evaluate function
+```{r}
+
+# Function to train and evaluate models with different feature subsets
+train_and_evaluate <- function(model, grid, 
+                               control, metrics, resamples, auto_split,
+                               train_data) {
+  
+  recipe <- recipe(Disease ~ ., data = train_data) |>
+  update_role(DAid,Age, Sex, new_role = "id") |>
+  step_normalize(all_numeric()) |> # scale mean to 0 and variance to 1
+  step_nzv(all_numeric()) |>
+  step_corr(all_numeric()) |> # Deal with colinerarity
+  step_impute_knn(all_numeric()) |> # Missing data with knn
+  step_downsample(Disease) # Deal with class imbalances: Myositis
+
+  model_wf <- workflow() %>%
+    add_model(model) %>%
+    add_recipe(recipe)
+
+  set.seed(502)
+  model_res <- tune_grid(
+    model_wf,
+    grid = grid,
+    control = control,
+    metrics = metrics,
+    resamples = resamples
+  )
+
+  best_model <- select_best(model_res, metric = "roc_auc")
+  final_model <- finalize_workflow(model_wf, best_model)
+  final_fit <- last_fit(final_model, auto_split)
+  
+  # Collect metrics
+  cv_metrics <- model_res |> collect_metrics()      
+  test_metrics <- final_fit |> collect_metrics()    
+  training_metrics <- cv_metrics |> 
+    filter(.metric %in% c("accuracy", "roc_auc")) |> 
+    group_by(.metric) |> 
+    summarise(mean = mean(mean), .groups = "drop")
+
+  return(list(
+    model = final_fit,               # Finalized model ready for use
+    training_metrics = training_metrics, # Training metrics
+    cv_metrics = cv_metrics,           # Cross-validation metrics
+    test_metrics = test_metrics        # Test set metrics
+  ))
+}
+
+```
+
+# Modelling
+
+```{r}
+
+set.seed(502)
+
+# Train and evaluate models
+glm_fit <- train_and_evaluate(logistic_model, 
+                              logistic_grid, model_control, 
+                              model_metrics, k_folds_data, auto_split,
+                              auto_train)
+
+rf_fit <- train_and_evaluate(rf_model, 
+                             rf_grid, model_control, model_metrics, 
+                             k_folds_data, auto_split,
+                             auto_train)
+
+knn_fit <- train_and_evaluate(knn_model, 
+                             knn_grid, model_control, model_metrics, 
+                             k_folds_data, auto_split,
+                             auto_train)
+
+xgboost_fit <- train_and_evaluate(xboost_model, 
+                             xgb_grid, model_control, model_metrics, 
+                             k_folds_data, auto_split,
+                             auto_train)
+
+models <- list(glm_fit, rf_fit, knn_fit, xgboost_fit)
+saveRDS(models, "models_new_cv5RData")
+
+```
+
+## ROC curves
+
+```{r}
+
+# Logistic reg -----------------------------------------------------------------
+roc_glm <- plot_roc_auc(glm_fit$model, "GLM + Lasso")
+
+# Random forest -----------------------------------------------------------------
+roc_rf <- plot_roc_auc(rf_fit$model, "Random Forest")
+
+# KNN
+roc_knn <- plot_roc_auc(knn_fit$model, "KNN")
+
+# xgb
+roc_xgb <- plot_roc_auc(xgboost_fit$model, "Xgboost")
+
+roc_plots <- list(
+  GLM = roc_glm,
+  RF = roc_rf,
+  KNN = roc_knn,
+  XGBoost = roc_xgb
+)
+
+# Save each plot with proper file names
+lapply(names(roc_plots), function(name) {
+  roc <- roc_plots[[name]]  # Retrieve the plot
+  file_name <- paste0("roc_", name, ".pdf")  # Construct the file name
+  ggsave(file_name, plot = roc, width = 12, height = 10)  # Save the plot
+})
+
+```
+
+## Final confusion matrices
+
+
+```{r} 
+
+glm_cf <- conf_mat_plot(glm_fit$model, "GLM + Lasso")
+rf_cf <- conf_mat_plot(rf_fit$model, "Random Forest")
+knn_cf <- conf_mat_plot(knn_fit$model, "KNN")
+xgb_cf <- conf_mat_plot(xgboost_fit$model, "XGBoost")
+
+ggsave("glm_confusion_matrix.pdf", glm_cf, width = 10, height = 8)
+ggsave("rf_confusion_matrix.pdf", rf_cf, width = 10, height = 8)
+ggsave("knn_confusion_matrix.pdf", knn_cf, width = 10, height = 8)
+ggsave("xgboost_confusion_matrix.pdf", xgb_cf, width = 10, height = 8)
+
+(glm_cf + rf_cf) / (knn_cf + xgb_cf)
+
+ggsave("confusion_matrices_models.pdf", width = 15, height = 12)
+
+```
+
+## VIP
+
+
+```{r}
+
+# GLM
+vi_reg <- glm_fit$model |>
+extract_fit_parsnip() |>
+vi() |>
+mutate(
+  Scaled_importance = rescale(Importance, to = c(0, 100)),
+  Scaled_importance_dir = if_else(Sign == "NEG", Scaled_importance * -1, Scaled_importance)
+)
+
+p1 <- barplot_vip(vi_table = vi_reg, 
+                  variable_y = "Scaled_importance", 
+                  tittle = "Regression + Lasso", 
+                  feature_num = 15,
+                  color = "#311847")
+p2 <- lollipop_vip(vi_table = vi_reg, 
+                   variable_y = "Scaled_importance", 
+                   feature_num = 10,
+                   tittle = "GLM + Lasso", 
+                   color = "cornflowerblue")
+p1
+p2
+
+# RF
+
+vi_rf <- rf_fit$model |>
+          extract_fit_parsnip() |>
+          vi() |>
+          mutate(Scaled_importance = rescale(Importance, to = c(0, 100)))
+
+
+
+p3 <- barplot_vip(vi_table = vi_rf, 
+                  tittle = "Random Forest",
+                  feature_num = 15,
+                  variable_y = "Scaled_importance", 
+                  color = "#21908CFF")
+
+p4 <- lollipop_vip(vi_table = vi_rf, 
+                   variable_y = "Scaled_importance", 
+                   feature_num = 10,
+                   tittle = "Random Forest", 
+                   color = "#21908CFF")
+p3
+p4
+# Patch work 
+
+vip_models <- p2 /p4
+ggsave("vip_RF_GLM_lollipop_plot.pdf", vip_models, width = 8, height = 12)
+ggsave("vip_GLM.pdf", p1, width = 8, height = 8)
+ggsave("vip_lollipop_GLM.pdf", p2, width = 8, height = 8)
+ggsave("vip_RF.pdf", p3, width = 8, height = 8)
+ggsave("vip_lollipop_RF.pdf", p4, width = 8, height = 8)
+
+vip_models
+
+```
+
+## Overlap of Important or relevant features
+
+```{r}
+
+library(VennDiagram)
+library(grid)
+
+glm_features <- vi_reg |> filter(Scaled_importance > 0) |> pull(Variable)
+rf_features <- vi_rf |> filter(Scaled_importance > 0) |> head(n = 50) |>  pull(Variable)
+
+# Find overlapping features
+intersect(glm_features, rf_features)
+
+venn.diagram(
+  x = list(GLM = glm_features, RF = rf_features),
+  category.names = c("GLM", "RF"),
+  filename = "Important_features_venn_rf_glm.png",  
+  output = TRUE,
+  imagetype = "png",
+  fill = c("#440154FF", "#21908CFF"),  
+  alpha = 0.5,                         
+  cat.cex = 1.5,
+  cat.fontfamily = "sans", 
+  cex = 1.5,                           
+  cat.pos = c(-20, 20),                
+  cat.dist = 0.05                      
+)
+
+
+
+```
+ts
+
+
+```{r}
+
+
+vip_glm_expr_plt_list <- lapply(glm_features, function(protein) {
+                      boxplot_expression(protein_name = protein, 
+                                         countmatrix = wide_data_auto, 
+                                         class = "Disease", 
+                                         color_palete = palete)})
+
+combined_plot <- wrap_plots(vip_glm_expr_plt_list, ncol = 3) 
+combined_plot + plot_layout(guides = "collect")  
+
+# Save to PDF
+ggsave("combined_protein_plots.pdf", combined_plot, width = 45, height = 35)
+
+```
+
+
+## VIP per class
+
+```{r}
+
+importance_class<- plot_vi_by_class(glm_fit$model, top_number = 10, palette = palete)
+ggsave("importance_per_class_GLM.pdf", importance_class, width = 20, height = 15)
+
+```
+
+
+# Feature selection with other models
+
+So far I have use embedded or inherent feature selection methods, meaning the model in itself selects the most important features for the classification. Now, I will try different strategies for feature selection.
+
+### Data budgeting
+
+```{r}
+
+# 1. Divide data: 70 training (70: DEA + model build. 30: validation), 30 testing
+# 2. Pre-processing and DEA
+# 3. Model building
+
+# Stratified train-test split
+
+set.seed(502)
+auto_split <- initial_split(wide_data_auto, prop = 0.70, strata = Disease)
+auto_train <- training(auto_split)  
+auto_test  <- testing(auto_split)  
+
+# Further split training data (70% DEA, 30% validation)
+train_split <- initial_split(auto_train, prop = 0.70, strata = Disease)
+fs_data <- training(train_split)  
+model_build_data <- testing(train_split)
+
+k_folds_data <- vfold_cv(model_build_data, v = 5, strata = Disease)
+
+```
+
+## DEA
+
+```{r}
+
+library(limma)
+
+# Code for DEA
+
+dea_design <- model.matrix(~ 0 + Disease + Age + Sex, data = fs_data)
+colnames(dea_design) <- c('Myo', 'RA', 'Sjo', 'SS', 'SLE', 'Age', 'SexM')
+
+contrast_matrix <- makeContrasts(
+  Myo_vs_All = Myo - (RA + Sjo + SS + SLE) / 5,
+  RA_vs_All = RA - (Myo + Sjo + SS + SLE) / 5,
+  Sjo_vs_All = Sjo - (Myo + RA + SS + SLE) / 5,
+  SS_vs_All = SS - (Myo + RA + Sjo + SLE) / 5,
+  SLE_vs_All = SLE - (Myo + RA + Sjo + SS) / 5,
+  levels = dea_design
+)
+
+fit_dea <- lmFit(t(select(fs_data, where(is.numeric))), dea_design)
+fit_dea <- contrasts.fit(fit_dea, contrast_matrix)
+fit_dea <- eBayes(fit_dea)
+
+
+```
+
+### Volcano plots
+```{r}
+
+# Extract the differential express proteins
+Myo_vs_All <- topTable(fit_dea, coef = "Myo_vs_All", n = nrow(fit_dea$p.value), confint = TRUE, adjust.method = 'fdr')
+RA_vs_All <- topTable(fit_dea, coef = "RA_vs_All",  n = nrow(fit_dea$p.value), confint = TRUE, adjust.method = 'fdr')
+Sjo_vs_All <- topTable(fit_dea, coef = "Sjo_vs_All",  n = nrow(fit_dea$p.value), confint = TRUE, adjust.method = 'fdr')
+SS_vs_All <- topTable(fit_dea, coef = "SS_vs_All",  n = nrow(fit_dea$p.value), confint = TRUE, adjust.method = 'fdr')
+SLE_vs_All <- topTable(fit_dea, coef = "SLE_vs_All",  n = nrow(fit_dea$p.value), confint = TRUE, adjust.method = 'fdr')
+
+DE_res <- list(
+  Myo_vs_All = Myo_vs_All,
+  RA_vs_All = RA_vs_All,
+  Sjo_vs_All = Sjo_vs_All,
+  SS_vs_All = SS_vs_All,
+  SLE_vs_All = SLE_vs_All
+)
+
+get_violinplot <- function(top_table, number2show, tittle) {
+  # Add Expression column
+  top_table <- top_table |>
+    mutate(Expression = case_when(
+      logFC >= log(1) & adj.P.Val < 0.05 ~ "Up-regulated",
+      logFC <= -log(1) & adj.P.Val < 0.05 ~ "Down-regulated",
+      TRUE ~ "Unchanged"
+    ))
+  
+  # Select top up- and down-regulated proteins
+  top_up <- top_table |>
+    filter(Expression == 'Up-regulated') |>
+    arrange(desc(-log10(adj.P.Val)), desc(abs(logFC))) |>
+    head(number2show)
+  
+  top_down <- top_table |>
+    filter(Expression == 'Down-regulated') |>
+    arrange(desc(-log10(adj.P.Val)), desc(abs(logFC))) |>
+    head(number2show)
+  
+  top_prt <- rbind(top_up, top_down)
+  
+  # Create the plot
+  ggplot(top_table, aes(
+    x = logFC, y = -log10(adj.P.Val),
+    color = ifelse(adj.P.Val < 0.05 & logFC > 0, "#6c0e23",
+                   ifelse(adj.P.Val < 0.05 & logFC < 0.5, "#3066be", "grey"))
+  )) +
+    geom_point() +
+    scale_color_identity() +
+    ggtitle(paste("Contrast: ", tittle)) +
+    theme_bw() +
+    ggrepel::geom_label_repel(
+      data = top_prt,
+      mapping = aes(logFC, -log10(adj.P.Val), label = rownames(top_prt)),
+      size = 2
+    )
+}
+
+plots <- lapply(names(DE_res), function(name) {
+  data <- DE_res[[name]]
+  plot <- get_violinplot(data, number2show = 40, tittle = name)
+  print(plot)
+  
+  return(plot) 
+})
+
+
+```
+```{r}
+
+# Save each individual plot with proper naming
+lapply(seq_along(plots), function(i) {
+  plot_name <- names(DE_res)[i]  
+  file_name <- paste0("Volcanoplot_", plot_name, ".pdf")  
+  ggsave(filename = file_name,
+        plot = plots[[i]],  
+        width = 8,
+        height = 6) })
+
+```
+
+### Feature selection
+
+#### Functions
+```{r}
+
+get_top_proteins <- function(top_table_list, n_top) {
+  # Helper function to process a single table
+  process_table <- function(top_table) {
+    top_table <- top_table |> 
+      
+      mutate(Expression = case_when(
+        logFC >= log(1) & adj.P.Val < 0.05  ~ "Up-regulated",
+        logFC <= -log(1) & adj.P.Val < 0.05 ~ "Down-regulated",
+        TRUE ~ "Unchanged"
+      )) |> 
+      filter(Expression %in% c("Up-regulated", "Down-regulated")) |> 
+      arrange(desc(-log10(adj.P.Val)), desc(abs(logFC))) |> 
+      head(n_top) |> 
+      rownames_to_column(var = "Protein") |> 
+      select(Protein)
+  }
+  
+  # Process all tables and merge results
+  top_features <- lapply(top_table_list, process_table) |> 
+    reduce(full_join, by = "Protein") |> 
+    pull(Protein)
+  
+  return(top_features)
+}
+
+```
+
+```{r}
+# Function to train and evaluate models with different feature subsets
+train_and_evaluate_fs <- function(model, grid, 
+                               control, metrics, resamples, auto_split,
+                               model_build_data, selected_features) {
+  
+  recipe <- recipe(Disease ~ ., data = model_build_data) |>
+  update_role(DAid,Age, Sex, new_role = "id") |>
+  update_role(-all_of(c(selected_features, "Disease")), new_role = "exclude") |> 
+  step_normalize(all_numeric()) |> # scale mean to 0 and variance to 1
+  step_nzv(all_numeric()) |>
+  step_corr(all_numeric()) |> # Deal with colinerarity
+  step_impute_knn(all_numeric()) |> # Missing data with knn
+  step_downsample(Disease) # Deal with class imbalances: Myositis
+
+  model_wf <- workflow() %>%
+    add_model(model) %>%
+    add_recipe(recipe)
+
+  model_res <- tune_grid(
+    model_wf,
+    grid = grid,
+    control = control,
+    metrics = metrics,
+    resamples = resamples
+  )
+
+  best_model <- select_best(model_res, metric = "roc_auc")
+  final_model <- finalize_workflow(model_wf, best_model)
+  final_fit <- last_fit(final_model, auto_split)
+  
+  # Collect metrics
+  cv_metrics <- model_res |> collect_metrics()      
+  test_metrics <- final_fit |> collect_metrics()    
+  training_metrics <- cv_metrics |> 
+    filter(.metric %in% c("accuracy", "roc_auc")) |> 
+    group_by(.metric) |> 
+    summarise(mean = mean(mean), .groups = "drop")
+
+  return(list(
+    model = final_fit,               # Finalized model ready for use
+    training_metrics = training_metrics, # Training metrics
+    cv_metrics = cv_metrics,           # Cross-validation metrics
+    test_metrics = test_metrics        # Test set metrics
+  ))
+}
+
+```
+
+#### HP optimization
+```{r}
+
+# Set up parallel backend
+all_cores <- parallel::detectCores(logical = FALSE) - 1
+registerDoParallel()
+cl <- makeCluster(all_cores, setup_strategy = "sequential")
+
+number_of_features <- c(5,10,15,20,25,30,35)
+
+# Data frame to store results
+results_df <- data.frame(
+  n_features = numeric(),
+  model = character(),
+  roc_auc = numeric()
+)
+
+set.seed(502)
+
+# Iterate over different feature subset sizes
+for (n_features in number_of_features) {
+  
+  print(paste("Processing feature subset size:", n_features))
+  
+  # Select top N features
+  top_tables <- list(Myo_vs_All, RA_vs_All, SS_vs_All, SLE_vs_All, Sjo_vs_All)
+  # Get selected features
+  selected_features <- get_top_proteins(top_tables, n_top = n_features)
+    
+  # Define the control and metrics
+  model_control <- control_grid(save_pred = TRUE, parallel_over = "everything")
+  model_metrics <- metric_set(accuracy, sens, spec, mn_log_loss, roc_auc)
+  
+  
+  # Train and evaluate models
+  glm_fit <- train_and_evaluate_fs(logistic_model, 
+                                logistic_grid, model_control, 
+                                model_metrics, k_folds_data, auto_split,
+                                model_build_data, selected_features = selected_features)
+  
+  rf_fit <- train_and_evaluate_fs(rf_model, 
+                               rf_grid, model_control, model_metrics, 
+                               k_folds_data, auto_split,
+                               model_build_data, selected_features = selected_features)
+  
+  knn_fit <- train_and_evaluate_fs(knn_model, 
+                               knn_grid, model_control, model_metrics, 
+                               k_folds_data, auto_split,
+                               model_build_data, selected_features = selected_features)
+  
+  xgboost_fit <- train_and_evaluate_fs(xboost_model, 
+                               xgb_grid, model_control, model_metrics, 
+                               k_folds_data, auto_split,
+                               model_build_data, selected_features = selected_features)
+
+# Safe ROC value for each model
+  glm_roc_auc <- collect_metrics(glm_fit)$.estimate[collect_metrics(glm_fit)$.metric == "roc_auc"]
+  rf_roc_auc <- collect_metrics(rf_fit)$.estimate[collect_metrics(rf_fit)$.metric == "roc_auc"]
+  knn_roc_auc <- collect_metrics(knn_fit)$.estimate[collect_metrics(knn_fit)$.metric == "roc_auc"]
+  xgboost_roc_auc <- collect_metrics(xgboost_fit)$.estimate[collect_metrics(xgboost_fit)$.metric == "roc_auc"]
+
+# Generate scatter plot for each 
+  results_df <- rbind(results_df,
+    data.frame(n_features = n_features,model = "GLM",roc_auc = glm_roc_auc),
+    data.frame(n_features = n_features,model = "RF",roc_auc = rf_roc_auc),
+    data.frame(n_features = n_features,model = "KNN",roc_auc = knn_roc_auc),
+    data.frame(n_features = n_features,model = "XGBoost",roc_auc = xgboost_roc_auc))
+
+}
+
+ggplot(results_df, aes(x = n_features, y = roc_auc, color = model)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+ labs(x = "Number of Features", y = "ROC AUC") +
+  ggtitle("ROC AUC vs. Number of Features")
+
+ggsave("feature_selection_roc_n_features.png", width = 8, height = 8)
+
+# Stop the cluster after tuning
+stopCluster(cl)
+
+```
+
+### Final model
+
+#### GLM
+According to the results we will select the GLM model with 30 features
+
+```{r}
+
+set.seed(502)
+
+# List of tables
+top_tables <- list(Myo_vs_All, RA_vs_All, SS_vs_All, SLE_vs_All, Sjo_vs_All)
+
+# Get selected features
+selected_features <- get_top_proteins(top_tables, n_top = 30)
+
+# Train and evaluate models
+glm_fit_dea <- train_and_evaluate_fs(logistic_model, 
+                  logistic_grid, model_control, 
+                  model_metrics, k_folds_data, auto_split,
+                  model_build_data, selected_features = selected_features)
+
+glm_fit_dea$model |> collect_metrics()
+
+```
+
+##### Confusion Matrix
+
+```{r}
+
+glm_dea_cm <- conf_mat_plot(glm_fit_dea$model, "GLM + Lasso")
+ggsave("Feature_selection_DEA/CM_GLM.pdf", glm_dea_cm, width = 10, height = 6)
+
+
+```
+
+##### VIP
+
+```{r}
+
+# GLM
+vi_reg_dea <- glm_fit_dea$model |>
+extract_fit_parsnip() |>
+vi() |>
+mutate(
+  Scaled_importance = rescale(Importance, to = c(0, 100)),
+  Scaled_importance_sign = if_else(Sign == "NEG", Scaled_importance * -1, Scaled_importance)
+)
+
+
+barplot <- barplot_vip(vi_table = vi_reg_dea,
+                       variable_y = "Scaled_importance",
+                       tittle = "Regression + Lasso",
+                       feature_num = 15,
+                       color = "#311847")
+
+llolipot <- lollipop_vip(vi_table = vi_reg_dea, 
+                         variable_y = "Scaled_importance_sign", 
+                         feature_num = 15,
+                         tittle = "Regression + Lasso", color = "#311847")
+
+
+ggsave("Feature_selection_DEA/VIP_GLM_DEA.pdf", barplot, width = 8, height = 8)
+ggsave("Feature_selection_DEA/VIP_lollipop_GLM_DEA.pdf", llolipot, width = 8, height = 8)
+
+
+```
+
+##### VIP by Class
+
+```{r}
+
+importance_class <- plot_vi_by_class(glm_fit_dea$model, palette = palete, top_number = 15)
+
+ggsave("Feature_selection_DEA/vip_per_class_GLM_FSDEA.pdf", importance_class, width = 20, height = 15)
+
+```
+
+#### Random Forest
+
+```{r}
+
+set.seed(502)
+
+# List of tables
+top_tables <- list(Myo_vs_All, RA_vs_All, SS_vs_All, SLE_vs_All, Sjo_vs_All)
+
+# Get selected features
+selected_features <- get_top_proteins(top_tables, n_top = 30)
+
+# Train and evaluate models
+rf_fit_dea <- train_and_evaluate_fs(rf_model, 
+                             rf_grid, model_control, model_metrics, 
+                             k_folds_data, auto_split,
+                             model_build_data, selected_features = selected_features)
+
+rf_fit_dea$model |> collect_metrics()
+
+
+```
+
+##### Confusion Matrix
+
+```{r}
+
+rf_dea_cm <- conf_mat_plot(rf_fit_dea$model, "Random Forest with DEA")
+ggsave("Feature_selection_DEA/CM_RF.pdf", rf_dea_cm, width = 10, height = 6)
+
+rf_dea_cm
+
+```
+
+##### VIP
+
+```{r}
+
+vi_rf_data <- rf_fit_dea$model |>
+              extract_fit_parsnip() |>
+              vi() |> 
+              mutate(Scaled_importance = rescale(Importance, to = c(0, 100)))
+
+barplot <- barplot_vip(vi_table = vi_rf_data,
+                       variable_y = "Scaled_importance",
+                       tittle = "Random Forest with DEA",
+                       feature_num = 15,
+                       color = "#311847")
+
+llolipot <- lollipop_vip(vi_table = vi_rf_data, 
+                         variable_y = "Scaled_importance", 
+                         feature_num = 15,
+                         tittle = "Random Forest with DEA", color = "#311847")
+
+ggsave("Feature_selection_DEA/VIP_RF_DEA.pdf", barplot, width = 8, height = 8)
+ggsave("Feature_selection_DEA/VIP_lollipop_RF_DEA.pdf", llolipot, width = 8, height = 8)
+
+
+```
+
+###### VIP by Class
+
+## K-medoids/Univariate analysis
+
+
+The idea is to follow the implementation by of the ProMS algorithm where:
+1. Remove uninformative features, ProMS examines each feature individually to determine the strength of the relationship between the feature and the target variable. For classification problem, a symmetric AUROC score AUCsym is defined to evaluate such strength: AUCsym=2×|AUC−0.5|
+
+2. ProMS only keeps the features with the top α % highest scores. Here α% is a hyperparameter that needs to be tuned jointly with other hyperparameters of the final estimator.
+3. After the filtering step, data matrix D is reduced to D′ of size n×p′ where p′≪p. 
+4. To further reduce the redundancy among the remaining features, ProMS groups p′ features into k clusters with weighted k-medoids clustering in sample space. The k medoids from each cluster are selected as markers. 
+
+All of this will be use in a step for tidymodels.
+
+
+###  Data budget
+
+
+Same as before
+
+### Functions
+
+```{r}
+
+# Function for ProMS Feature Selection
+proms_selection <- function(data, top_alpha, k_clusters) {
+  
+  # Load necessary library
+  library(WeightedCluster)
+  
+  # Step 1: Prepare Predictors and Target
+  predictors <- data |> select(-c(DAid, Age, Sex, Disease))
+  target <- data$Disease
+  
+  # Step 2: Calculate Multi-class AUC for Each Feature
+  auc_scores <- apply(predictors, 2, function(feature) {
+    auc_result <- pROC::multiclass.roc(target, feature, quiet = TRUE)
+    if (!is.null(auc_result)) mean(auc_result$auc) else 0
+  })
+  
+  # Step 3: Select Top Alpha% Features Based on AUC
+  num_features_to_keep <- ceiling(top_alpha / 100 * length(auc_scores))
+  feature_data <- data.frame(
+    feature = names(auc_scores),
+    auc = auc_scores
+  )
+  
+  # Rank features by AUC and select top features
+  top_features <- feature_data[order(feature_data$auc, decreasing = TRUE), "feature"][1:num_features_to_keep]
+  top_auc_scores <- feature_data[order(feature_data$auc, decreasing = TRUE), "auc"][1:num_features_to_keep]
+  
+  # Filter predictors to retain only the top features
+  filtered_data <- predictors[, top_features]
+  
+  # Step 4: Calculate Pairwise Distance Matrix
+  # Use a correlation-based distance: 1 - Pearson correlation
+  distance_matrix <- as.dist(1 - cor(filtered_data, use = "pairwise.complete.obs"))
+  
+  # Step 5: Perform Weighted K-Medoids Clustering
+  wc_kmedoids_result <- wcKMedoids(distance_matrix, k = k_clusters, weights = top_auc_scores)
+  
+  # Step 6: Extract Medoids
+  # `wcKMedoids` returns cluster assignments, so we manually identify medoid indices
+  cluster_labels <- unique(wc_kmedoids_result$clustering)
+  medoid_features <- filtered_data[cluster_labels] |> colnames() # Map cluster indices to feature names
+  
+  # Return Selected Medoid Features
+  return(medoid_features)
+}
+
+
+
+```
+
+
+
+### Model's Workflows
+
+
+```{r}
+
+# Define a list of models
+models <- list(
+  logistic_model = multinom_reg(penalty = tune(), mixture = 1) |>
+    set_engine("glmnet") |>
+    set_mode("classification"),
+  rf_model = rand_forest(trees = tune(), mtry = tune()) |>
+    set_mode("classification") |>
+    set_engine("ranger", importance = "impurity"),
+  knn_model = nearest_neighbor(neighbors = tune()) |>
+            set_mode("classification") |>
+            set_engine("kknn"),
+   xgboost_mod = boost_tree(mtry = tune(), trees = tune(), min_n = tune(), 
+               tree_depth = tune(),learn_rate = tune(), 
+               loss_reduction = tune(), sample_size = tune(),
+               stop_iter = tune()) |>
+               set_engine("xgboost") |>
+               set_mode("classification") |>
+               translate(),
+  svm_model = svm_rbf(cost = tune(), rbf_sigma = tune()) |>
+  set_mode("classification") |>
+  set_engine("kernlab")
+)
+
+```
+
+### Tunnning grids
+```{r}
+
+### Grids
+
+set.seed(502)
+
+
+# Logistic tuning grid (including ProMS parameters)
+logistic_grid <- grid_regular(
+  parameters(models$logistic_model),    # Logistic model parameters
+  levels = 30)
+
+# Finalize mtry based on the training data
+rf_params <- parameters(models$rf_model) |> 
+  update(mtry = finalize(mtry(), auto_train))  
+
+rf_grid <- grid_regular(
+          rf_params,          
+          levels = 6
+)
+
+# KNN tuning grid (including ProMS parameters)
+knn_grid <- grid_regular(
+            parameters(models$knn_model),         
+            levels = 15)
+
+# XGBoost tuning grid (including ProMS parameters)
+xgb_grid <- grid_latin_hypercube(
+  trees(),             
+  stop_iter(),         
+  tree_depth(),        
+  min_n(),             
+  loss_reduction(),    
+  sample_size = sample_prop(),
+  finalize(mtry(), auto_train),
+  learn_rate(), size = 10
+)
+
+# SVM tuning grid (including ProMS parameters)
+svm_grid <- grid_regular(
+  cost(range = c(0.1, 10)),       # Regularization parameter
+  rbf_sigma(range = c(0.001, 1)), # RBF kernel parameter
+  levels = 5
+)
+
+
+
+```
+
+### Alpha and K evaluation
+```{r}
+
+# Set up parallel backend
+all_cores <- parallel::detectCores(logical = FALSE) - 1
+registerDoParallel()
+cl <- makeCluster(all_cores, setup_strategy = "sequential")
+
+set.seed(502)
+
+# Hyperparameter Tuning Loop
+results <- tibble()
+
+for (alpha in seq(10, 50, by = 10)) {
+  for (clusters in seq(5, 35, by = 5)) {
+    
+    print(paste("Tuning with top_alpha =", alpha, "and k_clusters =", clusters))
+    
+    selected_features <- proms_selection(fs_data, alpha, clusters)
+
+    # Train and evaluate models
+    print("Working on GLM")
+    glm_fit <- train_and_evaluate_fs(models$logistic_model, 
+                                  logistic_grid, model_control, 
+                                  model_metrics, k_folds_data, auto_split,
+                                  model_build_data, selected_features = selected_features)
+    print("Working on Random Forest")
+    
+    rf_fit <- train_and_evaluate_fs(models$rf_model, 
+                                 rf_grid, model_control, model_metrics, 
+                                 k_folds_data, auto_split,
+                                 model_build_data, selected_features = selected_features)
+    
+    print("Working on KNN")
+    knn_fit <- train_and_evaluate_fs(models$knn_model, 
+                                 knn_grid, model_control, model_metrics, 
+                                 k_folds_data, auto_split,
+                                 model_build_data, selected_features = selected_features)
+    
+    print("Working on XGboost")
+    xgboost_fit <- train_and_evaluate_fs(models$xgboost_mod, 
+                                 xgb_grid, model_control, model_metrics, 
+                                 k_folds_data, auto_split,
+                                 model_build_data, selected_features = selected_features)
+    
+    print("Working on SVM")
+    svm_fit <- train_and_evaluate_fs(models$svm_model, 
+                                 svm_grid, model_control, model_metrics, 
+                                 k_folds_data, auto_split,
+                                 model_build_data, selected_features = selected_features)
+    
+    
+    #Collect metrics
+    metrics <- lapply(list(glm_fit, rf_fit, knn_fit, xgboost_fit, svm_fit), function(model) {
+    collect_metrics(model) %>%
+    filter(.metric == "roc_auc") %>%
+    pull(.estimate) })
+    
+    acc <- lapply(list(glm_fit, rf_fit, knn_fit, xgboost_fit, svm_fit), function(model) {
+    collect_metrics(model) %>%
+    filter(.metric == "accuracy") %>%
+    pull(.estimate) })
+    
+    results <- bind_rows(results, 
+                       tibble(top_alpha = alpha,
+                              k_clusters = clusters,
+                              roc_auc_glm = metrics[[1]],
+                              roc_auc_rf = metrics[[2]],
+                              roc_auc_knn = metrics[[3]],
+                              roc_auc_xg = metrics[[4]],
+                              roc_auc_svm = metrics[[5]],
+                              acc_glm = acc[[1]],
+                              acc_rf = acc[[2]],
+                              acc_knn = acc[[3]],
+                              acc_xg = acc[[4]],
+                              acc_svm = acc[[5]]
+                              ))
+    }
+}
+
+
+# Stop the cluster after tuning
+stopCluster(cl)
+
+```
+
+### Results
+```{r}
+
+# Create a heatmap plot
+ggplot(results, aes(x = k_clusters, y = top_alpha, fill = roc_auc_glm)) +
+  geom_tile() +                                        # Create heatmap tiles
+  scale_fill_gradient(low = "blue", high = "red") +     # Color gradient for ROC AUC
+  labs(
+    title = "Interaction Between Top Alpha and Number of Clusters",
+    x = "Number of Clusters (k)",
+    y = "Top Alpha (%)",
+    fill = "ROC AUC"
+  ) +
+  theme_minimal(base_size = 14) +                       # Clean theme
+  theme(
+    plot.title = element_text(face = "bold", size = 16),  # Bold title
+    axis.title = element_text(size = 14),               # Larger axis titles
+    legend.title = element_text(size = 12),             # Larger legend title
+    legend.text = element_text(size = 10)               # Larger legend text
+  )
+
+# Scatter plot with ROC AUC as color
+ggplot(results, aes(x = k_clusters, y = top_alpha, color = roc_auc_glm)) +
+  geom_point(size = 4) +                                 # Plot points
+  scale_color_gradient(low = "blue", high = "red") +      # Color gradient for ROC AUC
+  labs(
+    title = "Interaction Between Top Alpha and Number of Clusters",
+    x = "Number of Clusters (k)",
+    y = "Top Alpha (%)",
+    color = "ROC AUC"
+  ) +
+  theme_minimal(base_size = 14) +                         # Clean theme
+  theme(
+    plot.title = element_text(face = "bold", size = 16),  # Bold title
+    axis.title = element_text(size = 14),                 # Larger axis titles
+    legend.title = element_text(size = 12),               # Larger legend title
+    legend.text = element_text(size = 10)                 # Larger legend text
+  )
+
+
+```
+
+```{r}
+
+results_long <- results %>%
+  pivot_longer(
+    cols = starts_with("roc_auc_"),  # Select all roc_auc_* columns
+    names_to = "model",             # New column to store the column names
+    names_prefix = "roc_auc_",      # Remove this prefix from the column names
+    values_to = "auc"               # New column to store the values
+  )
+
+
+# Plot AUC for each model
+ggplot(results_long, aes(x = interaction(top_alpha, k_clusters), y = auc, color = model)) +
+  geom_point(size = 3, alpha = 0.7) +  # Points for individual AUC values
+  geom_line(aes(group = model), linewidth = 1) +  # Lines connecting points for each model
+  labs(
+    title = "AUC Comparison Across Models",
+    x = "top_alpha and k_clusters (combined)",
+    y = "AUC",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for clarity
+
+
+ggsave("FS_K_medoids_model_comparison.jpg", plot = last_plot(), width = 10, height = 8)
+
+
+
+```
+
+### Final models
+
+#### GLM
+
+```{r}
+
+set.seed(502)
+selected_features_md <- proms_selection(fs_data, 50, 30)
+
+# Train and evaluate models
+print("Working on GLM")
+glm_fit_medoids <- train_and_evaluate_fs(models$logistic_model, 
+                              logistic_grid, model_control, 
+                              model_metrics, k_folds_data, auto_split,
+                              model_build_data, selected_features = selected_features_md)
+
+glm_fit_medoids$model |> collect_metrics()
+
+
+```
+
+```{r}
+
+glm_medoids_cm <- conf_mat_plot(glm_fit_medoids$model , "GLM + Lasso")
+glm_medoids_roc_plot <- plot_roc_auc(glm_fit_medoids$model , "GLM + Lasso")
+
+glm_medoids_cm
+glm_medoids_roc_plot
+ggsave("FS_K_meloids/GLM_CM_Medoids.pdf", glm_medoids_cm, width = 10, height = 6)
+ggsave("FS_K_meloids/GLM_ROC_plot_medoids.pdf", glm_medoids_roc_plot, width = 8, height = 11)
+
+```
+
+```{r}
+
+# GLM
+vi_reg_medoids <- glm_fit_medoids$model  |>
+                  extract_fit_parsnip() |>
+                  vi() |> mutate(
+                  Scaled_importance = rescale(Importance, to = c(0, 100))#,
+  #Scaled_importance = if_else(Sign == "NEG", Scaled_importance * -1, Scaled_importance)
+)
+
+barplot_glm_medoids <- barplot_vip(vi_table = vi_reg_medoids, 
+                                   variable_y = "Scaled_importance",
+                                   tittle = "Regression + Lasso", 
+                                   color = "#311847")
+
+lollipop_glm_medoids <- lollipop_vip(vi_table = vi_reg_medoids, 
+                                     variable_y = "Scaled_importance", 
+                                     feature_num = 15,
+                                     tittle = "Regression + Lasso", color = "#311847")
+
+ggsave("FS_K_meloids/GLM_barplot_Medoids.pdf", barplot_glm_medoids, width = 10, height = 6)
+ggsave("FS_K_meloids/GLM_lollipop_medoids.pdf", lollipop_glm_medoids, width = 8, height = 8)
+
+```
+
+#### Random Forest
+
+```{r}
+
+# Train and evaluate models
+print("Working on Random Forest")
+
+set.seed(502)
+selected_features_md <- proms_selection(fs_data, 50, 30)
+    
+rf_fit_md <- train_and_evaluate_fs(models$rf_model, 
+                             rf_grid, model_control, model_metrics, 
+                             k_folds_data, auto_split,
+                             model_build_data, selected_features = selected_features_md)
+
+rf_fit_md$model |> collect_metrics()
+
+
+rf_medoids_cm <- conf_mat_plot(rf_fit_md$model , "RF")
+rf_medoids_roc_plot <- plot_roc_auc(rf_fit_md$model , "RF")
+
+rf_medoids_cm
+rf_medoids_roc_plot
+ggsave("FS_K_meloids/RF_CM_Medoids.pdf", glm_medoids_cm, width = 10, height = 6)
+ggsave("FS_K_meloids/RF_ROC_plot_medoids.pdf", glm_medoids_roc_plot, width = 8, height = 11)
+
+```
+
+```{r}
+
+vi_rf_medoids <- rf_fit_md$model  |>
+                  extract_fit_parsnip() |>
+                  vi() |> mutate(
+                  Scaled_importance = rescale(Importance, to = c(0, 100))
+)
+
+barplot_rf_medoids <- barplot_vip(vi_table = vi_rf_medoids, 
+                                   variable_y = "Scaled_importance",
+                                   tittle = "Regression + Lasso", 
+                                   color = "#311847")
+
+lollipop_rf_medoids <- lollipop_vip(vi_table = vi_rf_medoids, 
+                                     variable_y = "Scaled_importance", 
+                                     feature_num = 15,
+                                     tittle = "Regression + Lasso", color = "#311847")
+
+
+ggsave("FS_K_meloids/RF_barplot_Medoids.pdf", barplot_glm_medoids, width = 10, height = 6)
+ggsave("FS_K_meloids/RF_lollipop_medoids.pdf", lollipop_glm_medoids, width = 8, height = 8)
+
+
+```
+
+
+# FS strategies comparison
+
+#### Accuracy & ROC values
+
+```{r}
+
+# Comparison of train, test set accuracy and ROC values
+
+models_metrics <- list(GLM = glm_fit, 
+                       GLM_DEA = glm_fit_dea, 
+                       GLM_md = glm_fit_medoids, 
+                       RF = rf_fit, 
+                       RF_DEA = rf_fit_dea, 
+                       RF_md = rf_fit_md)
+
+# Generate a dataframe summarizing metrics for all models
+metrics_df <- do.call(rbind, lapply(names(models_metrics), function(name) {
+  train_metrics <- models_metrics[[name]]$training_metrics
+  cv_metrics <- models_metrics[[name]]$cv_metrics
+  test_metrics <- models_metrics[[name]]$test_metrics
+  
+  data.frame(
+    model = name,
+    train_acc = train_metrics[train_metrics$.metric == "accuracy", "mean", drop = TRUE],
+    train_auc = train_metrics[train_metrics$.metric == "roc_auc", "mean", drop = TRUE],
+    test_acc = test_metrics[test_metrics$.metric == "accuracy", ".estimate", drop = TRUE],
+    test_auc = test_metrics[test_metrics$.metric == "roc_auc", ".estimate", drop = TRUE]
+  )
+}))
+
+print(metrics_df)
+
+metrics_df_long <- metrics_df |> pivot_longer(!model, names_to = "metric", values_to = "value") 
+
+compplot_auc <- metrics_df_long |> 
+  filter(grepl("auc", metric)) |> 
+  ggplot(aes(x = model, y = value, fill = metric)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + 
+  geom_text(aes(label = round(value, 3)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 3.5) + 
+  scale_fill_manual(
+    values = c("#143642", "#0f8b8d"),
+    labels = c("Test", "Train")  # Custom labels for legend
+  ) +
+  theme_ema() + 
+  labs(
+    title = "",
+    x = "Model",
+    y = "AUC Value",
+    fill = "Metric"  # Legend title
+  ) 
+
+compplot_acc <- metrics_df_long |> 
+  filter(grepl("acc", metric)) |> 
+  ggplot(aes(x = model, y = value, fill = metric)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + 
+  geom_text(aes(label = round(value, 3)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 3.5) + 
+  scale_fill_manual(
+    values = c("#143642", "#0f8b8d"),
+    labels = c("Test", "Train")  # Custom labels for legend
+  ) +
+  theme_ema() + 
+  labs(
+    title = "",
+    x = "Model",
+    y = "Accuracy Value",
+    fill = "Metric"  # Legend title
+  ) + 
+  theme(
+    plot.title = element_text(hjust = 0.5),  # Center title
+    legend.position = "right"                 # Move legend to top
+  )
+
+
+compplot_auc + compplot_acc
+ggsave("METRICS_RF_GLM_COMPARISON.pdf", metric_comparison, width = 20, height = 6)
+
+
+
+```
+
+
+
+#### VIP - UpSet plot
+```{r}
+
+library(UpSetR)
+library(dplyr)
+
+# Regular GLM
+glm_features <- vi_reg |> filter(Scaled_importance > 0) |> pull(Variable)
+# GLM + DEA
+glm_features_dea <- vi_reg_dea |> filter(Scaled_importance > 0) |> pull(Variable)
+# GLM + K-medoids
+glm_features_medoids <- vi_reg_medoids|> filter(Scaled_importance > 0) |> pull(Variable)
+# Regular RF
+rf_features <- vi_rf |> head(n = 40) |> pull(Variable)
+# RF + DEA
+rf_features_dea <- vi_rf_data |> head(n = 40) |> pull(Variable)
+# RF + K-medoids
+rf_features_md <- vi_rf_medoids |> head(n = 40) |> pull(Variable)
+
+
+features_list <- list(
+  GLM = glm_features,
+  GLM_DEA = glm_features_dea,
+  GLM_medoids = glm_features_medoids,
+  RF = rf_features,
+  RF_DEA = rf_features_dea,
+  RF_medoids = rf_features_md
+)
+
+pdf("UpSet_Plot_Scientific_Journal.pdf", width = 8, height = 6) # Adjust size as needed
+
+# Create UpSet plot
+upset(fromList(features_list), 
+      sets = names(features_list), 
+      order.by = "freq", 
+      text.scale = 1.5, 
+      mainbar.y.label = "Intersection Size", 
+      sets.x.label = "Set Size",
+      keep.order = TRUE)
+
+dev.off()
+
+```
+
+
+
+### Comparing GLM accross strategies
+
+Comparison of features selected as important by regular GLM, GLM + DEA and GLM + K-medoids
+
+```{r}
+
+# Regular GLM
+glm_features <- vi_reg |> filter(Scaled_importance > 0) |> pull(Variable)
+
+# GLM + DEA
+glm_features_dea <- vi_reg_dea |> filter(Scaled_importance > 0) |> pull(Variable)
+
+# GLM + K-medoids
+glm_features_medoids <- vi_reg_medoids|> filter(Scaled_importance > 0) |> pull(Variable)
+
+# Find overlapping features
+glm_vs_dea <- intersect(glm_features, glm_features_dea)
+intersect(glm_features, glm_features_medoids)
+intersect(glm_features_dea, glm_features_medoids)
+
+# Unique features between GLM and GLM_DEA
+unique_to_glm <- setdiff(glm_features, glm_features_dea)
+unique_to_glm_dea <- setdiff(glm_features_dea, glm_features)
+unique_to_glm_clst <- setdiff(glm_features_medoids, glm_features)
+
+print(unique_to_glm)       
+print(unique_to_glm_dea)   
+
+
+# Generate Venn diagram
+venn.diagram(
+  x = list(
+    GLM = glm_features,
+    GLM_DEA = glm_features_dea,
+    GLM_Clustering = glm_features_medoids
+  ),
+  category.names = c("GLM", "GLM_DEA", "GLM_Clustering"),
+  filename = "glm_FS_VIP_comparison.png",  
+  output = TRUE,
+  imagetype = "png",
+  fill = c("#440154FF", "#21908CFF", "#FDC067FF"),  
+  alpha = 0.5,                         
+  cat.cex = 1.5,
+  cat.fontfamily = "sans", 
+  cex = 1.5,                           
+  cat.pos = c(-20, 20, 0),  # Adjust positions for clarity              
+  cat.dist = c(0.05, 0.05, 0.05)  # Adjust distances for labels                   
+)
+
+```
+
+# Network
+
+
+```{r}
+
+# Graph
+
+library(igraph)
+library(ggraph)
+library(tidyverse)
+
+
+
+## Create edge list
+edges <- bind_rows(
+  lapply(names(features_list), function(model) {
+    tibble(
+      Protein = features_list[[model]],
+      Model = model
+    )
+  })
+)
+
+# Create a graph object
+g <- graph_from_data_frame(edges, directed = FALSE)
+
+# Generate protein-level attributes
+node_df <- edges %>%
+  group_by(Protein) %>%
+  summarize(models = paste(unique(Model), collapse = ","),
+            num_models = n_distinct(Model)) %>%
+  ungroup()
+
+# Assign node attributes
+V(g)$type <- ifelse(V(g)$name %in% edges$Protein, "Protein", "Model")
+V(g)$models <- ifelse(V(g)$type == "Protein",
+                      node_df$models[match(V(g)$name, node_df$Protein)],
+                      NA)
+V(g)$num_models <- ifelse(V(g)$type == "Protein",
+                          node_df$num_models[match(V(g)$name, node_df$Protein)],
+                          NA)
+
+# Enhanced Visualization
+net_prot <- ggraph(g, layout = "fr") +
+  geom_edge_link(
+    aes(edge_alpha = 0.8),
+    color = "gray40",
+    edge_width = 1.2,
+    show.legend = FALSE
+  ) +
+  geom_node_point(
+    aes(
+      fill = type,
+      size = ifelse(type == "Model", 6, as.numeric(num_models))
+    ),
+    shape = ifelse(V(g)$type == "Model", 21, 21), # Square for models, circle for proteins
+    color = "black"
+  ) +
+  geom_node_text(
+    aes(label = name),
+    repel = TRUE,
+    size = 4
+  ) +
+  scale_fill_manual(values = c("Protein" = "#1BB6AFFF", "Model" = "purple4")) +
+  scale_size_continuous(range = c(5, 15)) +
+  theme_void() +
+  labs(
+    title = "Protein-Model Network",
+    fill = "Node Type",
+    size = "Models Associated"
+  )
+
+ggsave("protein_VIP_network_models.pdf", net_prot, width = 12, height = 10)
+
+```
+
+
+# Functional Analysis
+
+
+```{r}
+
+# Heatmap
+library(ComplexHeatmap)
+
+protein_names <- c(
+  "CA4", "BMP4", "CCN1", "CRTAC1", "IRAG2", "BMP4", "TNFSF11", "TNFSF14",
+  "CX3CL1", "HSPG2", "CRACR2A", "PODXL2", "FABP2", "FOLR1", "CRHBP",
+  "TRAF2", "PPY", "CXCL10", "CPA2", "C2", "IL6", "FAP", "CD93", "ITM2A",
+  "COMP", "CNDP1", "CES3", "WARS", "SEMA4C", "KLK13", "HAGH", "EREG",
+  "HSPB6", "ADGRG2"
+)
+
+# Perform enrichment for all three protein lists
+functions1 <- protein_functions(glm_features, protein_names)
+functions2 <- protein_functions(glm_features_dea, protein_names)
+functions3 <- protein_functions(glm_features_medoids, protein_names)
+functions4 <- protein_functions(rf_features, protein_names)
+functions5 <- protein_functions(rf_features_dea, protein_names)
+functions6 <- protein_functions(rf_features_md, protein_names)
+
+###
+functions1_glm <- functions1 |> mutate(model = "GLM")
+functions2_glm_dea <- functions2 |> mutate(model = "GLM+DEA")
+functions3_glm_md <- functions3 |> mutate(model = "GLM+Medoids")
+functions4_rf <- functions4 |> mutate(model = "RF")
+functions5_rf_dea <- functions5 |> mutate(model = "RF+DEA")
+functions6_rf_md <- functions6 |> mutate(model = "RF+Medoids")
+
+functions_combined <- bind_rows(functions1_glm, functions2_glm_dea,
+                              functions3_glm_md, functions4_rf, 
+                              functions5_rf_dea, functions6_rf_md)
+
+functions_combined_sel <- functions_combined |> filter(SYMBOL %in% protein_names) |>
+                         dplyr::select(Description, SYMBOL) |> distinct()
+
+GO_top_proteins <- ggplot(functions_combined_sel, aes(x = Description, y = SYMBOL)) +
+  geom_point(color = "#1BB6AFFF", size = 4, alpha = 0.8) +  # Black dots
+  coord_flip() +
+  labs(x = "Biological Term", y = "Protein",
+       title = "Biological Terms Associated with Top Overlapping ´Proteins") +
+  theme_minimal() +  # Minimalist theme for publication style
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 10),  # 90° angle and font size 12
+    axis.text.y = element_text(size = 10),  # Font size for y-axis labels
+    axis.title = element_text(size = 14),  # Font size for axis titles
+    plot.title = element_text(size = 14, face = "bold"),  # Title font size and style
+    plot.margin = margin(1, 1, 1, 1, "cm")  # Adjust margins
+  )
+
+ggsave("GO_Top_Overlapping.pdf", GO_top_proteins, width = 12, height = 10)
+
+```
+
+# UMAP
+
+
+```{r}
+
+glm_features_selected <- c(unique_to_glm, unique_to_glm_clst, unique_to_glm_dea)
+
+# Call t-SNE function
+umap_plot_overlap_all_models <- perform_umap(wide_data_auto, 
+                                protein_names, 
+                                "UMAP GLM Features", palete)
+
+# Call PCA function
+pca_plot_overlap_all_models <- perform_pca(wide_data_auto, 
+                                protein_names, 
+                                "PCA GLM",
+                                palete)
+
+# Call t-SNE function
+umap_plot_GLM_ALL_VIP <- perform_umap(wide_data_auto, 
+                                glm_features_selected, 
+                                "UMAP GLM Features", palete)
+
+
+
+# Call PCA function
+pca_plot_GLM_ALL_VIP <- perform_pca(wide_data_auto, 
+                                glm_features_selected, 
+                                "PCA GLM",
+                                palete)
+
+
+
+
+# Display the plots
+print(umap_plot_overlap_all_models)
+print(pca_plot_overlap_all_models)
+print(umap_plot_GLM_ALL_VIP)
+print(pca_plot_GLM_ALL_VIP)
+
+ggsave("UMAP_OVERLAP_PROTEINS_MODELS.PDF", umap_plot_overlap_all_models, width = 8, height = 6)
+
+
+```
+
+
+
