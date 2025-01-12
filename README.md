@@ -1,6 +1,5 @@
 # Machine Learning-Based Profiling of Autoimmune Diseases
 
-Field: AI
 
 ### **Background:**
 
